@@ -50,6 +50,7 @@ class ConfigParserV1(ConfigParserVersion):
             "-lmr": not_zero,
             "-smm": not_zero,
             "-smr": not_zero,
+            "-lev": not_zero,
         }
 
         flags = {}
