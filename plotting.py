@@ -64,6 +64,7 @@ def make_table(result_):
                 ("Average daily gain", f"adg_{side}", 3, 100, "%"),
                 ("Average daily gain weighted", f"adg_weighted_{side}", 3, 100, "%"),
                 ("Loss to profit ratio", f"loss_profit_ratio_{side}", 4, 1, ""),
+                ("Exposure ratios mean", f"exposure_ratios_mean_{side}", 5, 1, ""),
                 (f"Price action distance mean", f"pa_distance_mean_{side}", 6, 1, ""),
                 (f"Price action distance std", f"pa_distance_std_{side}", 6, 1, ""),
                 (f"Price action distance max", f"pa_distance_max_{side}", 6, 1, ""),
@@ -193,14 +194,20 @@ def dump_plots(
                 ema_dist_upper = result[side][
                     "ema_dist_entry" if side == "short" else "ema_dist_close"
                 ]
-                ema_bands = pd.DataFrame(
-                    {
-                        "ema_band_lower": emas.min(axis=1) * (1 - ema_dist_lower),
-                        "ema_band_upper": emas.max(axis=1) * (1 + ema_dist_upper),
-                    },
-                    index=df.index,
-                )
-                df = df.join(ema_bands)
+                if abs(ema_dist_lower) < 0.1:
+                    df = df.join(
+                        pd.DataFrame(
+                            {"ema_band_lower": emas.min(axis=1) * (1 - ema_dist_lower)},
+                            index=df.index,
+                        )
+                    )
+                if abs(ema_dist_upper) < 0.1:
+                    df = df.join(
+                        pd.DataFrame(
+                            {"ema_band_upper": emas.max(axis=1) * (1 + ema_dist_upper)},
+                            index=df.index,
+                        )
+                    )
             for z in range(n_parts):
                 start_ = z / n_parts
                 end_ = (z + 1) / n_parts
@@ -215,7 +222,10 @@ def dump_plots(
                 else:
                     print(f"no {side} fills...")
             if result["passivbot_mode"] == "clock":
-                df = df.drop(["ema_band_lower", "ema_band_upper"], axis=1)
+                if "ema_band_lower" in df.columns:
+                    df = df.drop(["ema_band_lower"], axis=1)
+                if "ema_band_upper" in df.columns:
+                    df = df.drop(["ema_band_upper"], axis=1)
 
     print("plotting wallet exposures...")
     plt.clf()
