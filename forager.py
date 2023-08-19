@@ -3,6 +3,10 @@ import os
 os.environ["NOJIT"] = "true"
 
 import ccxt.async_support as ccxt
+
+assert (
+    ccxt.__version__ == "3.1.31"
+), f"Currently ccxt {ccxt.__version__} is installed. Please pip reinstall requirements.txt or install ccxt v3.1.31 manually"
 import json
 import hjson
 import pprint
@@ -235,7 +239,7 @@ async def get_current_symbols(cc):
     current_open_orders = []
     poss = await cc.fetch_positions()
     for elm in poss:
-        if elm["contracts"] != 0.0:
+        if elm["contracts"] is not None and elm["contracts"] != 0.0:
             if elm["side"] == "long":
                 current_positions_long.append(elm["symbol"])
             elif elm["side"] == "short":
@@ -244,7 +248,7 @@ async def get_current_symbols(cc):
         oos = []
         delay_s = 0.5
         for symbol in cc.markets:
-            if symbol.endswith("USDT"):
+            if symbol.endswith(":USDT"):
                 sts = time.time()
                 oosf = await cc.fetch_open_orders(symbol=symbol)
                 spent = time.time() - sts
@@ -252,6 +256,11 @@ async def get_current_symbols(cc):
                 oos += oosf
                 time.sleep(max(0.0, delay_s - spent))
         print()
+    elif cc.id == "bitget":
+        oos = await cc.private_mix_get_order_margincoincurrent({"productType": "umcbl"})
+        oos = oos["data"]
+        for i in range(len(oos)):
+            oos[i]["symbol"] = oos[i]["symbol"].replace("_UMCBL", "")
     elif cc.id == "binanceusdm":
         cc.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
         oos = await cc.fetch_open_orders()
@@ -264,6 +273,7 @@ async def get_current_symbols(cc):
             current_open_orders_short.append(elm["symbol"])
         else:
             current_open_orders_long.append(elm["symbol"])
+
     current_positions_long = sorted(set(current_positions_long))
     current_positions_short = sorted(set(current_positions_short))
     current_open_orders_long = sorted(set(current_open_orders_long))
@@ -381,9 +391,13 @@ async def main():
         "okx": "okx",
         "bybit": "bybit",
         "binance": "binanceusdm",
+        "bitget": "bitget",
     }
     parser = argparse.ArgumentParser(prog="forager", description="start forager")
     parser.add_argument("forager_config_path", type=str, help="path to forager config")
+    parser.add_argument(
+        "-n", "--noloop", "--no-loop", "--no_loop", dest="no_loop", help="break after first iter", action="store_true"
+    )
     args = parser.parse_args()
     config = hjson.load(open(args.forager_config_path))
     config["yaml_filepath"] = f"{config['user']}.yaml"
@@ -418,6 +432,8 @@ async def main():
             print()
             subprocess.run(["tmux", "kill-session", "-t", config["user"]])
             subprocess.run(["tmuxp", "load", "-d", config["yaml_filepath"]])
+            if args.no_loop:
+                return
             for i in range(config["update_interval_minutes"] * 60, -1, -1):
                 time.sleep(1)
                 print(f"\rcountdown: {i}    ", end=" ")

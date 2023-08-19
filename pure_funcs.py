@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import json
 import numpy as np
-from dateutil import parser
+import dateutil.parser
 from njit_funcs import round_dynamic, qty_to_cost
 
 try:
@@ -21,7 +21,7 @@ except:
 
 
 def format_float(num):
-    return np.format_float_positional(num, trim="-")
+    return np.format_float_positional(num, trim="0")
 
 
 def compress_float(n: float, d: int) -> str:
@@ -274,10 +274,17 @@ def ts_to_date_utc(timestamp: float) -> str:
 
 
 def date_to_ts(d):
-    return int(parser.parse(d).replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    return int(dateutil.parser.parse(d).replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
 
 
 def date_to_ts2(datetime_string):
+    return (
+        dateutil.parser.parse(datetime_string).replace(tzinfo=datetime.timezone.utc).timestamp()
+        * 1000
+    )
+
+
+def date_to_ts2_old(datetime_string):
     try:
         date_formats = [
             "%Y",
@@ -287,6 +294,10 @@ def date_to_ts2(datetime_string):
             "%Y-%m-%dT%H:%M",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%SZ",
         ]
         for format in date_formats:
             try:
@@ -766,10 +777,16 @@ def analyze_fills_slim(fills_long: list, fills_short: list, stats: list, config:
     exposure_ratios_long = [
         qty_to_cost(elm[3], elm[4], config["inverse"], config["c_mult"]) / elm[10] for elm in stats
     ]
+    time_at_max_exposure_long = (
+        1.0 if len(stats) == 0 else (len([x for x in exposure_ratios_long if x > 0.9]) / len(stats))
+    )
     exposure_ratios_mean_long = np.mean(exposure_ratios_long)
     exposure_ratios_short = [
         qty_to_cost(elm[5], elm[6], config["inverse"], config["c_mult"]) / elm[11] for elm in stats
     ]
+    time_at_max_exposure_short = (
+        1.0 if len(stats) == 0 else (len([x for x in exposure_ratios_short if x > 0.9]) / len(stats))
+    )
     exposure_ratios_mean_short = np.mean(exposure_ratios_short)
 
     return {
@@ -794,6 +811,8 @@ def analyze_fills_slim(fills_long: list, fills_short: list, stats: list, config:
         "eqbal_ratio_std_short": eqbal_ratio_std_short,
         "exposure_ratios_mean_long": exposure_ratios_mean_long,
         "exposure_ratios_mean_short": exposure_ratios_mean_short,
+        "time_at_max_exposure_long": time_at_max_exposure_long,
+        "time_at_max_exposure_short": time_at_max_exposure_short,
     }
 
 
@@ -906,9 +925,12 @@ def analyze_fills(
         for i in range(config["adg_n_subdivisions"]):
             idx = round(int(len(sdf) * (1 - 1 / (i + 1))))
             n_days_ = (sdf.timestamp.iloc[-1] - sdf.timestamp.iloc[idx]) / (1000 * 60 * 60 * 24)
-            adgs_long.append(
-                (sdf.balance_long.iloc[-1] / sdf.balance_long.iloc[idx]) ** (1 / n_days_) - 1
-            )
+            if n_days_ == 0.0 or sdf.balance_long.iloc[idx] == 0.0:
+                adgs_long.append(0.0)
+            else:
+                adgs_long.append(
+                    (sdf.balance_long.iloc[-1] / sdf.balance_long.iloc[idx]) ** (1 / n_days_) - 1
+                )
         adg_long = adgs_long[0]
         adg_weighted_long = np.mean(adgs_long)
     if sdf.balance_short.iloc[-1] <= 0.0:
@@ -919,9 +941,12 @@ def analyze_fills(
         for i in range(config["adg_n_subdivisions"]):
             idx = round(int(len(sdf) * (1 - 1 / (i + 1))))
             n_days_ = (sdf.timestamp.iloc[-1] - sdf.timestamp.iloc[idx]) / (1000 * 60 * 60 * 24)
-            adgs_short.append(
-                (sdf.balance_short.iloc[-1] / sdf.balance_short.iloc[idx]) ** (1 / n_days_) - 1
-            )
+            if n_days_ == 0.0 or sdf.balance_short.iloc[idx] == 0.0:
+                adgs_short.append(0.0)
+            else:
+                adgs_short.append(
+                    (sdf.balance_short.iloc[-1] / sdf.balance_short.iloc[idx]) ** (1 / n_days_) - 1
+                )
         adg_short = adgs_short[0]
         adg_weighted_short = np.mean(adgs_short)
     if config["long"]["wallet_exposure_limit"] > 0.0:
@@ -965,8 +990,14 @@ def analyze_fills(
     eqbal_ratio_std_short = eqbal_ratios_sdf_short.std()
 
     exposure_ratios_long = sdf.wallet_exposure_long / config["long"]["wallet_exposure_limit"]
+    time_at_max_exposure_long = (
+        1.0 if len(sdf) == 0 else (len(exposure_ratios_long[exposure_ratios_long > 0.9]) / len(sdf))
+    )
     exposure_ratios_mean_long = exposure_ratios_long.mean()
     exposure_ratios_short = sdf.wallet_exposure_short / config["short"]["wallet_exposure_limit"]
+    time_at_max_exposure_short = (
+        1.0 if len(sdf) == 0 else (len(exposure_ratios_short[exposure_ratios_short > 0.9]) / len(sdf))
+    )
     exposure_ratios_mean_short = exposure_ratios_short.mean()
 
     analysis = {
@@ -1005,6 +1036,8 @@ def analyze_fills(
         "adg_weighted_per_exposure_short": adg_weighted_per_exposure_short,
         "exposure_ratios_mean_long": exposure_ratios_mean_long,
         "exposure_ratios_mean_short": exposure_ratios_mean_short,
+        "time_at_max_exposure_long": time_at_max_exposure_long,
+        "time_at_max_exposure_short": time_at_max_exposure_short,
         "n_days": n_days,
         "n_fills_long": len(fills_long),
         "n_fills_short": len(fills_short),
@@ -1283,16 +1316,23 @@ def round_values(xs, n: int):
 
 
 def floatify(xs):
-    try:
+    if isinstance(xs, (int, float)):
         return float(xs)
-    except (ValueError, TypeError):
-        if type(xs) == list:
-            return [floatify(x) for x in xs]
-        if type(xs) == dict:
-            return {k: floatify(v) for k, v in xs.items()}
-        if type(xs) == tuple:
-            return tuple([floatify(x) for x in xs])
-    return xs
+    elif isinstance(xs, str):
+        try:
+            return float(xs)
+        except (ValueError, TypeError):
+            return xs
+    elif isinstance(xs, bool):
+        return xs
+    elif isinstance(xs, list):
+        return [floatify(x) for x in xs]
+    elif isinstance(xs, tuple):
+        return tuple(floatify(x) for x in xs)
+    elif isinstance(xs, dict):
+        return {k: floatify(v) for k, v in xs.items()}
+    else:
+        return xs
 
 
 def get_daily_from_income(
@@ -1540,7 +1580,10 @@ def shorten_custom_id(id_: str) -> str:
 
 
 def determine_pos_side_ccxt(open_order: dict) -> str:
-    oo = open_order["info"]
+    if "info" in open_order:
+        oo = open_order["info"]
+    else:
+        oo = open_order
     keys_map = {key.lower().replace("_", ""): key for key in oo}
     for poskey in ["posside", "positionside"]:
         if poskey in keys_map:
