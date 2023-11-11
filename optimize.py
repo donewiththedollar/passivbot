@@ -15,6 +15,8 @@ from njit_funcs import round_dynamic
 from pure_funcs import (
     analyze_fills_slim,
     denumpyize,
+    numpyize,
+    make_compatible,
     get_template_live_config,
     ts_to_date,
     ts_to_date_utc,
@@ -43,6 +45,90 @@ import logging.config
 logging.config.dictConfig({"version": 1, "disable_existing_loggers": True})
 
 
+def calc_metrics_mean(analyses):
+    # first analysis in analyses is full backtest
+    mins = [
+        "closest_bkr_long",
+        "closest_bkr_short",
+        "eqbal_ratio_mean_of_10_worst_long",
+        "eqbal_ratio_mean_of_10_worst_short",
+        "eqbal_ratio_min_long",
+        "eqbal_ratio_min_short",
+    ]
+    firsts = [
+        "n_days",
+        "exchange",
+        "adg_long",
+        "adg_per_exposure_long",
+        "adg_weighted_long",
+        "adg_weighted_per_exposure_long",
+        "adg_short",
+        "adg_per_exposure_short",
+        "adg_weighted_short",
+        "adg_weighted_per_exposure_short",
+        "fee_sum_long",
+        "fee_sum_short",
+        "final_balance_long",
+        "final_balance_short",
+        "final_equity_long",
+        "final_equity_short",
+        "gain_long",
+        "gain_short",
+        "loss_sum_long",
+        "loss_sum_short",
+        "n_closes_long",
+        "n_closes_short",
+        "n_days",
+        "n_entries_long",
+        "n_entries_short",
+        "n_fills_long",
+        "n_fills_short",
+        "n_ientries_long",
+        "n_ientries_short",
+        "n_normal_closes_long",
+        "n_normal_closes_short",
+        "n_rentries_long",
+        "n_rentries_short",
+        "n_unstuck_closes_long",
+        "n_unstuck_closes_short",
+        "n_unstuck_entries_long",
+        "n_unstuck_entries_short",
+        "net_pnl_plus_fees_long",
+        "net_pnl_plus_fees_short",
+        "pnl_sum_long",
+        "pnl_sum_short",
+        "profit_sum_long",
+        "profit_sum_short",
+        "starting_balance",
+        "pa_distance_1pct_worst_mean_long",
+        "pa_distance_1pct_worst_mean_short",
+        "symbol",
+        "volume_quote_long",
+        "volume_quote_short",
+    ]
+    maxs = [
+        "hrs_stuck_max_long",
+        "hrs_stuck_max_short",
+    ]
+    analysis_combined = {}
+    for key in mins:
+        if key in analyses[0]:
+            analysis_combined[key] = min([a[key] for a in analyses])
+    for key in firsts:
+        if key in analyses[0]:
+            analysis_combined[key] = analyses[0][key]
+    for key in maxs:
+        if key in analyses[0]:
+            analysis_combined[key] = max([a[key] for a in analyses])
+    for key in analyses[0]:
+        if key not in analysis_combined:
+            try:
+                analysis_combined[key] = np.mean([a[key] for a in analyses])
+            except:
+                analysis_combined[key] = analyses[0][key]
+    return analysis_combined
+
+
 def backtest_wrap(config_: dict, ticks_caches: dict):
     """
     loads historical data from disk, runs backtest and returns relevant metrics
@@ -58,6 +144,7 @@ def backtest_wrap(config_: dict, ticks_caches: dict):
                 "market_type",
                 "config_no",
                 "adg_n_subdivisions",
+                "n_backtest_slices",
                 "slim_analysis",
             ]
         },
@@ -69,11 +156,26 @@ def backtest_wrap(config_: dict, ticks_caches: dict):
         ticks = np.load(config_["ticks_cache_fname"])
     try:
         assert "adg_n_subdivisions" in config
-        fills_long, fills_short, stats = backtest(config, ticks)
-        if config["slim_analysis"]:
-            analysis = analyze_fills_slim(fills_long, fills_short, stats, config)
-        else:
-            longs, shorts, sdf, analysis = analyze_fills(fills_long, fills_short, stats, config)
+        analyses = []
+        n_slices = max(1, config["n_backtest_slices"])
+        slices = [(0, len(ticks))]
+        if n_slices > 2:
+            slices += [
+                (
+                    int(len(ticks) * (i / n_slices)),
+                    min(len(ticks), int(len(ticks) * ((i + 2) / n_slices))),
+                )
+                for i in range(max(1, n_slices - 1))
+            ]
+        for ia, ib in slices:
+            data = ticks[ia:ib]
+            fills_long, fills_short, stats = backtest(config, data)
+            if config["slim_analysis"]:
+                analysis = analyze_fills_slim(fills_long, fills_short, stats, config)
+            else:
+                longs, shorts, sdf, analysis = analyze_fills(fills_long, fills_short, stats, config)
+            analyses.append(analysis.copy())
+        analysis = calc_metrics_mean(analyses)
     except Exception as e:
         analysis = get_empty_analysis()
         logging.error(f'error with {config["symbol"]} {e}')
@@ -91,13 +193,22 @@ async def main(algorithm=None):
         prog="Optimize multi symbol", description="Optimize passivbot config multi symbol"
     )
     parser.add_argument(
-        "-o",
+        "-oc",
         "--optimize_config",
         type=str,
         required=False,
         dest="optimize_config_path",
         default="configs/optimize/default.hjson",
         help="optimize config hjson file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output_path",
+        type=str,
+        required=False,
+        dest="optimize_output_path",
+        default=None,
+        help="optimize results directory. Defaults to 'results_{algorithm}_{passivbot_mode}/",
     )
     parser.add_argument(
         "-t",
@@ -140,7 +251,7 @@ async def main(algorithm=None):
         required=False,
         dest="passivbot_mode",
         default=None,
-        help="passivbot mode options: [s/static_grid, r/recursive_grid, n/neat_grid, c/clock]",
+        help="passivbot mode options: [r/recursive_grid, n/neat_grid, c/clock]",
     )
     parser.add_argument(
         "-a",
@@ -153,24 +264,70 @@ async def main(algorithm=None):
         help="optimization algorithm options: [p/pso/particle_swarm_optimization, h/hs/harmony_search]",
     )
     parser.add_argument(
+        "-ct",
+        "--clip-threshold",
+        "--clip_threshold",
+        type=float,
+        required=False,
+        dest="clip_threshold",
+        default=None,
+        help="clip_threshold (see opt config for details)",
+    )
+    parser.add_argument(
         "-ser", "--serial", help="optimize symbols singly, not multi opt", action="store_true"
+    )
+    parser.add_argument(
+        "-sm",
+        "--skip_multicoin",
+        "--skip-multicoin",
+        type=str,
+        required=False,
+        dest="skip_multicoin",
+        default=None,
+        help="y/n when using --start dir/, skip multicoin configs (see opt config for details)",
+    )
+    parser.add_argument(
+        "-ss",
+        "--skip_singlecoin",
+        "--skip-singlecoin",
+        type=str,
+        required=False,
+        dest="skip_singlecoin",
+        default=None,
+        help="y/n when using --start dir/, skip single coin configs (see opt config for details)",
+    )
+    parser.add_argument(
+        "-sns",
+        "--skip_non_matching_single_coin",
+        "--skip-non-matching-single-coin",
+        type=str,
+        required=False,
+        dest="skip_non_matching_single_coin",
+        default=None,
+        help="y/n when using --start dir/, skip configs of other symbols (see opt config for details)",
+    )
+    parser.add_argument(
+        "-sms",
+        "--skip_matching_single_coin",
+        "--skip-matching-single-coin",
+        type=str,
+        required=False,
+        dest="skip_matching_single_coin",
+        default=None,
+        help="y/n when using --start dir/, skip configs of same symbol (see opt config for details)",
     )
     parser = add_argparse_args(parser)
     args = parser.parse_args()
-    if args.symbol is None or "," in args.symbol:
-        args.symbol = "BTCUSDT"  # dummy symbol
-    config = await prepare_optimize_config(args)
+    config = prepare_optimize_config(args)
     args = parser.parse_args()
     if algorithm is not None:
         args.algorithm = algorithm
-    if args.symbol is not None:
-        config["symbols"] = args.symbol.split(",")
     if args.serial:
         all_symbols = config["symbols"].copy()
         print(f"running single coin optimizations serially for symbols {all_symbols}")
         for symbol in all_symbols:
-            args.symbol = symbol
-            config = await prepare_optimize_config(args)
+            args.symbols = symbol
+            config = prepare_optimize_config(args)
             await run_opt(args, config)
     else:
         await run_opt(args, config)
@@ -178,37 +335,7 @@ async def main(algorithm=None):
 
 async def run_opt(args, config):
     try:
-        if args.passivbot_mode is not None:
-            if args.passivbot_mode in ["s", "static_grid", "static"]:
-                config["passivbot_mode"] = "static_grid"
-            elif args.passivbot_mode in ["r", "recursive_grid", "recursive"]:
-                config["passivbot_mode"] = "recursive_grid"
-            elif args.passivbot_mode in ["n", "neat_grid", "neat"]:
-                config["passivbot_mode"] = "neat_grid"
-            elif args.passivbot_mode in ["c", "clock"]:
-                config["passivbot_mode"] = "clock"
-            else:
-                raise Exception(f"unknown passivbot mode {args.passivbot_mode}")
-        algorithm = config["algorithm"] if args.algorithm is None else args.algorithm
-        if algorithm in [
-            "p",
-            "pso",
-            "particle_swarm_optimization",
-            "particle-swarm-optimization",
-        ]:
-            config["algorithm"] = "particle_swarm_optimization"
-        elif algorithm in ["h", "hs", "harmony_search", "harmony-search"]:
-            config["algorithm"] = "harmony_search"
-        else:
-            raise Exception(f"unknown optimization algorithm {algorithm}")
-        passivbot_mode = config["passivbot_mode"]
-        assert passivbot_mode in [
-            "recursive_grid",
-            "static_grid",
-            "neat_grid",
-            "clock",
-        ], f"unknown passivbot mode {passivbot_mode}"
-        config.update(get_template_live_config(passivbot_mode))
+        config.update(get_template_live_config(config["passivbot_mode"]))
         config["long"]["backwards_tp"] = config["backwards_tp_long"]
         config["short"]["backwards_tp"] = config["backwards_tp_short"]
         config["exchange"] = load_exchange_key_secret_passphrase(config["user"])[0]
@@ -230,13 +357,13 @@ async def run_opt(args, config):
                 config["short"]["enabled"] = config["do_short"] = False
             else:
                 raise Exception("please specify y/n with kwarg -le/--short")
-        if args.symbol is not None:
-            config["symbols"] = args.symbol.split(",")
+        if args.symbols is not None:
+            config["symbols"] = args.symbols.split(",")
         if args.n_cpus is not None:
             config["n_cpus"] = args.n_cpus
         if args.base_dir is not None:
             config["base_dir"] = args.base_dir
-        if passivbot_mode == "clock":
+        if config["passivbot_mode"] == "clock":
             config["ohlcv"] = True
         print()
         lines = [
@@ -264,17 +391,17 @@ async def run_opt(args, config):
                 cache_dirpath + "market_specific_settings.json"
             ):
                 logging.info(f"fetching data {symbol}")
-                args.symbol = symbol
-                tmp_cfg = await prepare_backtest_config(args)
+                args.symbols = symbol
+                tmp_cfg = prepare_backtest_config(args)
                 if config["ohlcv"]:
                     data = await load_hlc_cache(
                         symbol,
-                        config["inverse"],
-                        config["start_date"],
+                        tmp_cfg["inverse"],
+                        tmp_cfg["start_date"],
                         config["end_date"],
                         base_dir=config["base_dir"],
-                        spot=config["spot"],
-                        exchange=config["exchange"],
+                        spot=tmp_cfg["spot"],
+                        exchange=tmp_cfg["exchange"],
                     )
                     """
                     config["shared_memories"][symbol] = shared_memory.SharedMemory(
@@ -288,62 +415,41 @@ async def run_opt(args, config):
                 else:
                     downloader = Downloader({**config, **tmp_cfg})
                     await downloader.get_sampled_ticks()
-        if config["algorithm"] == "particle_swarm_optimization":
-            from particle_swarm_optimization import ParticleSwarmOptimization
 
-            # prepare starting configs
-            cfgs = []
-            if args.starting_configs is not None:
-                logging.info("preparing starting configs...")
+        # prepare starting configs
+        cfgs = []
+        if args.starting_configs is not None:
+            if os.path.exists(args.starting_configs):
                 if os.path.isdir(args.starting_configs):
-                    for fname in os.listdir(args.starting_configs):
+                    # a directory was passed as starting config
+                    fnames = [f for f in os.listdir(args.starting_configs) if f.endswith(".json")]
+
+                    if "skip_multicoin" in config["starting_configs_filtering_conditions"]:
+                        fnames = [f for f in fnames if "symbols" not in f]
+                    if "skip_singlecoin" in config["starting_configs_filtering_conditions"]:
+                        fnames = [f for f in fnames if "symbols" in f]
+                    if (
+                        "skip_non_matching_single_coin"
+                        in config["starting_configs_filtering_conditions"]
+                    ):
+                        fnames = [f for f in fnames if "symbols" in f or config["symbols"][0] in f]
+                    if "skip_matching_single_coin" in config["starting_configs_filtering_conditions"]:
+                        fnames = [
+                            f for f in fnames if "symbols" in f or config["symbols"][0] not in f
+                        ]
+
+                    for fname in fnames:
                         try:
-                            """
-                            #  uncomment to skip single starting configs with wrong symbol
-                            if not any(x in os.path.join(args.starting_configs, fname) for x in [config["symbols"][0], "symbols"]):
-                                print("skipping", os.path.join(args.starting_configs, fname))
-                                continue
-                            """
                             cfg = load_live_config(os.path.join(args.starting_configs, fname))
                             assert (
-                                determine_passivbot_mode(cfg) == passivbot_mode
+                                determine_passivbot_mode(cfg) == config["passivbot_mode"]
                             ), "wrong passivbot mode"
                             cfgs.append(cfg)
                             logging.info(f"successfully loaded config {fname}")
 
                         except Exception as e:
                             logging.error(f"error loading config {fname}: {e}")
-                elif os.path.exists(args.starting_configs):
-                    try:
-                        cfg = load_live_config(args.starting_configs)
-                        assert determine_passivbot_mode(cfg) == passivbot_mode, "wrong passivbot mode"
-                        cfgs.append(cfg)
-                        logging.info(f"successfully loaded config {args.starting_configs}")
-                    except Exception as e:
-                        logging.error(f"error loading config {args.starting_configs}: {e}")
-            config["starting_configs"] = cfgs
-            particle_swarm_optimization = ParticleSwarmOptimization(config, backtest_wrap)
-            particle_swarm_optimization.run()
-        elif config["algorithm"] == "harmony_search":
-            from harmony_search import HarmonySearch
-
-            # prepare starting configs
-            cfgs = []
-            if args.starting_configs is not None:
-                logging.info("preparing starting configs...")
-                if os.path.isdir(args.starting_configs):
-                    for fname in os.listdir(args.starting_configs):
-                        try:
-                            cfg = load_live_config(os.path.join(args.starting_configs, fname))
-                            assert (
-                                determine_passivbot_mode(cfg) == passivbot_mode
-                            ), "wrong passivbot mode"
-                            cfgs.append(cfg)
-                            logging.info(f"successfully loaded config {fname}")
-
-                        except Exception as e:
-                            logging.error(f"error loading config {fname}: {e}")
-                elif os.path.exists(args.starting_configs):
+                elif args.starting_configs.endswith(".json"):
                     hm_load_failed = True
                     if "hm_" in args.starting_configs:
                         try:
@@ -353,8 +459,9 @@ async def run_opt(args, config):
                                     "long": hm[k]["long"]["config"],
                                     "short": hm[k]["short"]["config"],
                                 }
+                                cfg = sort_dict_keys(numpyize(make_compatible(cfg)))
                                 assert (
-                                    determine_passivbot_mode(cfg) == passivbot_mode
+                                    determine_passivbot_mode(cfg) == config["passivbot_mode"]
                                 ), "wrong passivbot mode in harmony memory"
                                 cfgs.append(cfg)
                             logging.info(f"loaded harmony memory {args.starting_configs}")
@@ -367,18 +474,38 @@ async def run_opt(args, config):
                         try:
                             cfg = load_live_config(args.starting_configs)
                             assert (
-                                determine_passivbot_mode(cfg) == passivbot_mode
+                                determine_passivbot_mode(cfg) == config["passivbot_mode"]
                             ), "wrong passivbot mode"
                             cfgs.append(cfg)
+                            logging.info(f"successfully loaded config {args.starting_configs}")
                         except Exception as e:
                             logging.error(f"error loading config {args.starting_configs}: {e}")
-            config["starting_configs"] = cfgs
+
+        config["starting_configs"] = cfgs
+        config["keys_to_include"] = [
+            "starting_balance",
+            "latency_simulation_ms",
+            "market_type",
+            "adg_n_subdivisions",
+            "n_backtest_slices",
+            "slim_analysis",
+        ]
+
+        if config["algorithm"] == "particle_swarm_optimization":
+            from particle_swarm_optimization import ParticleSwarmOptimization
+
+            particle_swarm_optimization = ParticleSwarmOptimization(config, backtest_wrap)
+            particle_swarm_optimization.run()
+        elif config["algorithm"] == "harmony_search":
+            from harmony_search import HarmonySearch
+
             harmony_search = HarmonySearch(config, backtest_wrap)
             harmony_search.run()
     finally:
-        for symbol in config["shared_memories"]:
-            config["shared_memories"][symbol].close()
-            config["shared_memories"][symbol].unlink()
+        if "shared_memories" in config:
+            for symbol in config["shared_memories"]:
+                config["shared_memories"][symbol].close()
+                config["shared_memories"][symbol].unlink()
 
 
 if __name__ == "__main__":

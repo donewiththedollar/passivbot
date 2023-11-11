@@ -57,13 +57,7 @@ class ParticleSwarmOptimization:
         self.long_bounds = sort_dict_keys(config[f"bounds_{self.config['passivbot_mode']}"]["long"])
         self.short_bounds = sort_dict_keys(config[f"bounds_{self.config['passivbot_mode']}"]["short"])
         self.symbols = config["symbols"]
-        self.identifying_name = (
-            f"{len(self.symbols)}_symbols" if len(self.symbols) > 1 else self.symbols[0]
-        )
-        self.now_date = ts_to_date(time())[:19].replace(":", "-")
-        self.results_fpath = make_get_filepath(
-            f"results_particle_swarm_optimization_{self.config['passivbot_mode']}/{self.now_date}_{self.identifying_name}/"
-        )
+        self.results_fpath = make_get_filepath(config["results_fpath"])
         self.exchange_name = config["exchange"] + ("_spot" if config["market_type"] == "spot" else "")
         self.market_specific_settings = {
             s: json.load(
@@ -219,16 +213,7 @@ class ParticleSwarmOptimization:
                 "long": deepcopy(template["long"]),
                 "short": deepcopy(template["short"]),
             },
-            **{
-                k: self.config[k]
-                for k in [
-                    "starting_balance",
-                    "latency_simulation_ms",
-                    "market_type",
-                    "adg_n_subdivisions",
-                    "slim_analysis"
-                ]
-            },
+            **{k: self.config[k] for k in self.config["keys_to_include"]},
             **{"symbol": self.symbols[0], "config_no": self.iter_counter},
         }
         for side in ["long", "short"]:
@@ -319,16 +304,7 @@ class ParticleSwarmOptimization:
                 "long": deepcopy(self.swarm[swarm_key]["long"]["config"]),
                 "short": deepcopy(self.swarm[swarm_key]["short"]["config"]),
             },
-            **{
-                k: self.config[k]
-                for k in [
-                    "starting_balance",
-                    "latency_simulation_ms",
-                    "market_type",
-                    "adg_n_subdivisions",
-                    "slim_analysis"
-                ]
-            },
+            **{k: self.config[k] for k in self.config["keys_to_include"]},
             **{
                 "symbol": self.symbols[0],
                 "initial_eval_key": swarm_key,
