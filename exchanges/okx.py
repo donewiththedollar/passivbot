@@ -5,12 +5,14 @@ import json
 import traceback
 from time import time, time_ns
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import aiohttp
 import numpy as np
 import ccxt.async_support as ccxt
 
 from procedures import load_ccxt_version
+
 ccxt_version_req = load_ccxt_version()
 assert (
     ccxt.__version__ == ccxt_version_req
@@ -32,6 +34,7 @@ class OKXBot(Bot):
         self.okx = getattr(ccxt, "okx")(
             {"apiKey": self.key, "secret": self.secret, "password": self.passphrase}
         )
+        self.custom_id_max_length = 32
 
     async def init_market_type(self):
         self.markets = None
@@ -154,7 +157,9 @@ class OKXBot(Bot):
                 self.okx.fetch_positions(),
                 self.okx.fetch_balance(),
             )
-            positions = [e for e in positions if e["symbol"] == self.symbol]
+            positions = [
+                e for e in positions if e["symbol"] == self.symbol and e["marginMode"] == "cross"
+            ]
             position = {
                 "long": {"size": 0.0, "price": 0.0, "liquidation_price": 0.0},
                 "short": {"size": 0.0, "price": 0.0, "liquidation_price": 0.0},
@@ -211,10 +216,8 @@ class OKXBot(Bot):
                 if order["type"] == "limit":
                     params["ordType"] = "post_only"
                     params["px"] = order["price"]
-                custom_id_ = self.broker_code
-                if "custom_id" in order:
-                    custom_id_ += order["custom_id"]
-                params["clOrdId"] = shorten_custom_id(f"{custom_id_}{uuid.uuid4().hex}")[:32]
+
+                params["clOrdId"] = order["custom_id"]
                 # print('debug client order id', params['clOrdId'])
                 # print('debug execute order', params)
                 to_execute.append(params)
@@ -584,3 +587,15 @@ class OKXBot(Bot):
                     standardized["other_symbol"] = event["o"]["s"]
                     standardized["other_type"] = "order_update"
         return standardized
+
+    def format_custom_ids(self, orders: [dict]) -> [dict]:
+        # okx needs broker code at the beginning of the custom_id
+        new_orders = []
+        for order in orders:
+            order["custom_id"] = (
+                self.broker_code
+                + shorten_custom_id(order["custom_id"] if "custom_id" in order else "")
+                + uuid4().hex
+            )[: self.custom_id_max_length]
+            new_orders.append(order)
+        return new_orders

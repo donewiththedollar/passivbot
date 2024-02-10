@@ -122,7 +122,18 @@ class BinanceBot(Bot):
     async def init_market_type(self):
         fapi_endpoint = "https://fapi.binance.com"
         dapi_endpoint = "https://dapi.binance.com"
+        fws_endpoint = "wss://fstream.binance.com"
+        dws_endpoint = "wss://dstream.binance.com"
+        spot_base_endpoint = "https://api.binance.com"
+
         self.exchange_info = None
+        if self.test_mode:
+            fapi_endpoint = "https://testnet.binancefuture.com"
+            dapi_endpoint = "https://testnet.binancefuture.com"
+            fws_endpoint = "wss://stream.binancefuture.com"
+            dws_endpoint = "wss://dstream.binancefuture.com"
+            spot_base_endpoint = "https://testnet.binance.vision"
+
         try:
             self.exchange_info = await self.public_get(
                 "/fapi/v1/exchangeInfo", base_endpoint=fapi_endpoint
@@ -150,7 +161,7 @@ class BinanceBot(Bot):
                     "margin_type": "/fapi/v1/marginType",
                     "leverage": "/fapi/v1/leverage",
                     "position_side": "/fapi/v1/positionSide/dual",
-                    "websocket": (ws := f"wss://fstream.binance.com/ws/"),
+                    "websocket": (ws := f"{fws_endpoint}/ws/"),
                     "websocket_market": ws + f"{self.symbol.lower()}@aggTrade",
                     "websocket_user": ws,
                     "listen_key": "/fapi/v1/listenKey",
@@ -183,7 +194,7 @@ class BinanceBot(Bot):
                         "margin_type": "/dapi/v1/marginType",
                         "leverage": "/dapi/v1/leverage",
                         "position_side": "/dapi/v1/positionSide/dual",
-                        "websocket": (ws := f"wss://dstream.binance.com/ws/"),
+                        "websocket": (ws := f"{dws_endpoint}/ws/"),
                         "websocket_market": ws + f"{self.symbol.lower()}@aggTrade",
                         "websocket_user": ws,
                         "listen_key": "/dapi/v1/listenKey",
@@ -197,7 +208,7 @@ class BinanceBot(Bot):
             traceback.print_exc()
             raise Exception("stopping bot")
 
-        self.spot_base_endpoint = "https://api.binance.com"
+        self.spot_base_endpoint = spot_base_endpoint
         self.endpoints["transfer"] = "/sapi/v1/asset/transfer"
         self.endpoints["futures_transfer"] = "/sapi/v1/futures/transfer"
         self.endpoints["account"] = "/api/v3/account"
@@ -396,10 +407,7 @@ class BinanceBot(Bot):
             if params["type"] == "LIMIT":
                 params["timeInForce"] = "GTX"
                 params["price"] = order["price"]
-            if "custom_id" in order:
-                params[
-                    "newClientOrderId"
-                ] = f"{order['custom_id']}_{str(int(time() * 1000))[8:]}_{int(np.random.random() * 1000)}"
+            params["newClientOrderId"] = order["custom_id"]
             o = await self.private_post(self.endpoints["create_order"], params)
             return {
                 "symbol": self.symbol,
@@ -431,10 +439,7 @@ class BinanceBot(Bot):
                 if params["type"] == "LIMIT":
                     params["timeInForce"] = "GTX"
                     params["price"] = order["price"]
-                if "custom_id" in order:
-                    params[
-                        "newClientOrderId"
-                    ] = f"{order['custom_id']}_{str(int(time() * 1000))[8:]}_{int(np.random.random() * 1000)}"
+                params["newClientOrderId"] = order["custom_id"]
                 to_execute.append(params)
             executed = await self.private_post(
                 self.endpoints["batch_orders"], {"batchOrders": to_execute}, data_=True

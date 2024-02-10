@@ -11,6 +11,7 @@ import argparse
 import pandas as pd
 
 import sys
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from procedures import (
@@ -162,7 +163,7 @@ async def main():
         print("failed reading log", e)
     jsons = [json.loads(line) for line in lines]
     if args.n_days is not None:
-        jsons = [x for x in jsons if x['timestamp'] > now - 1000 * 60 * 60 * 24 * args.n_days]
+        jsons = [x for x in jsons if x["timestamp"] > now - 1000 * 60 * 60 * 24 * args.n_days]
 
     dfts = []
     first = None

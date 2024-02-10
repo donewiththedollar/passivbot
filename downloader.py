@@ -10,6 +10,7 @@ from io import BytesIO
 from time import time
 from typing import Tuple
 from urllib.request import urlopen
+from functools import reduce
 import zipfile
 import traceback
 import aiohttp
@@ -1038,27 +1039,31 @@ def get_days_in_between(start_day, end_day):
     return days_in_between
 
 
-async def download_ohlcvs_bybit(symbol, start_date, end_date, download_only=False):
+async def download_ohlcvs_bybit(symbol, start_date, end_date, spot=False, download_only=False):
     start_date, end_date = get_day(start_date), get_day(end_date)
     assert date_to_ts2(end_date) >= date_to_ts2(start_date), "end_date is older than start_date"
-    dirpath = make_get_filepath(f"historical_data/ohlcvs_bybit/{symbol}/")
+    dirpath = make_get_filepath(f"historical_data/ohlcvs_bybit{'_spot' if spot else ''}/{symbol}/")
     ideal_days = get_days_in_between(start_date, end_date)
     days_done = [filename[:-4] for filename in os.listdir(dirpath) if ".csv" in filename]
     days_to_get = [day for day in ideal_days if day not in days_done]
     dfs = {}
     if len(days_to_get) > 0:
-        base_url = "https://public.bybit.com/trading/"
+        base_url = f"https://public.bybit.com/{'spot' if spot else 'trading'}/"
         webpage = await get_bybit_webpage(base_url, symbol)
-        filenames = [cand for day in days_to_get if (cand := f"{symbol}{day}.csv.gz") in webpage]
+        filenames = [
+            cand
+            for day in days_to_get
+            if (cand := f"{symbol}{'_' if spot else ''}{day}.csv.gz") in webpage
+        ]
         if len(filenames) > 0:
             n_concurrent_fetches = 10
             for i in range(0, len(filenames), 10):
                 filenames_sublist = filenames[i : i + n_concurrent_fetches]
                 print(
-                    f"fetching trades from {filenames_sublist[0][-17:-7]} to {filenames_sublist[-1][-17:-7]}"
+                    f"fetching {len(filenames_sublist)} files with {symbol} trades from {filenames_sublist[0][-17:-7]} to {filenames_sublist[-1][-17:-7]}"
                 )
                 dfs_ = await get_bybit_trades(base_url, symbol, filenames_sublist)
-                dfs_ = {k[-17:-7]: convert_to_ohlcv(v) for k, v in dfs_.items()}
+                dfs_ = {k[-17:-7]: convert_to_ohlcv(v, spot) for k, v in dfs_.items()}
                 dumped = []
                 for day, df in sorted(dfs_.items()):
                     if day in days_done:
@@ -1070,7 +1075,7 @@ async def download_ohlcvs_bybit(symbol, start_date, end_date, download_only=Fals
                     dfs.update(dfs_)
     if not download_only:
         for day in ideal_days:
-            if day not in days_to_get:
+            if os.path.exists(f"{dirpath}{day}.csv"):
                 dfs[day] = pd.read_csv(f"{dirpath}{day}.csv")
         if len(dfs) == 0:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -1114,17 +1119,17 @@ async def get_csv_gz(session, url: str):
         return pd.DataFrame()
 
 
-def convert_to_ohlcv(df, interval=60000):
+def convert_to_ohlcv(df, spot, interval=60000):
     # bybit data
-    # timestamps are in seconds
-    groups = df.groupby((df.timestamp * 1000) // interval * interval)
+    # timestamps are in seconds for futures, millis for spot
+    groups = df.groupby((df.timestamp * (1 if spot else 1000)) // interval * interval)
     ohlcvs = pd.DataFrame(
         {
             "open": groups.price.first(),
             "high": groups.price.max(),
             "low": groups.price.min(),
             "close": groups.price.last(),
-            "volume": groups["size"].sum(),
+            "volume": groups["volume" if spot else "size"].sum(),
         }
     )
     new_index = np.arange(ohlcvs.index[0], ohlcvs.index[-1] + interval, interval)
@@ -1138,7 +1143,7 @@ def convert_to_ohlcv(df, interval=60000):
 
 async def download_single_ohlcvs_binance(url: str, fpath: str):
     try:
-        print(f'fetching {url}')
+        print(f"fetching {url}")
         csv = await get_zip_binance(url)
         csv.to_csv(fpath)
     except Exception as e:
@@ -1168,13 +1173,31 @@ async def download_ohlcvs_binance(
     # do months async
     months_filepaths = {month: os.path.join(dirpath, month + ".csv") for month in months}
     missing_months = {k: v for k, v in months_filepaths.items() if not os.path.exists(v)}
-    await asyncio.gather(*[download_single_ohlcvs_binance(base_url + f"monthly/klines/{symbol}/1m/{symbol}-1m-{k}.zip", v) for k, v in missing_months.items()])
+    await asyncio.gather(
+        *[
+            download_single_ohlcvs_binance(
+                base_url + f"monthly/klines/{symbol}/1m/{symbol}-1m-{k}.zip", v
+            )
+            for k, v in missing_months.items()
+        ]
+    )
     months_done = sorted([x for x in os.listdir(dirpath) if x[:-4] in months_filepaths])
 
     # do days async
     days_filepaths = {day: os.path.join(dirpath, day + ".csv") for day in days}
-    missing_days = {k: v for k, v in days_filepaths.items() if not os.path.exists(v) and k[:7] + '.csv' not in months_done}
-    await asyncio.gather(*[download_single_ohlcvs_binance(base_url + f"daily/klines/{symbol}/1m/{symbol}-1m-{k}.zip", v) for k, v in missing_days.items()])
+    missing_days = {
+        k: v
+        for k, v in days_filepaths.items()
+        if not os.path.exists(v) and k[:7] + ".csv" not in months_done
+    }
+    await asyncio.gather(
+        *[
+            download_single_ohlcvs_binance(
+                base_url + f"daily/klines/{symbol}/1m/{symbol}-1m-{k}.zip", v
+            )
+            for k, v in missing_days.items()
+        ]
+    )
     days_done = sorted([x for x in os.listdir(dirpath) if x[:-4] in days_filepaths])
 
     # delete days contained in months
@@ -1187,13 +1210,15 @@ async def download_ohlcvs_binance(
 
     if not download_only:
         fnames = os.listdir(dirpath)
-        dfs = [pd.read_csv(os.path.join(dirpath, fpath)) for fpath in months_done + days_done if fpath in fnames]
+        dfs = [
+            pd.read_csv(os.path.join(dirpath, fpath))
+            for fpath in months_done + days_done
+            if fpath in fnames
+        ]
         df = pd.concat(dfs)[col_names].sort_values("timestamp")
         df = df.drop_duplicates(subset=["timestamp"]).reset_index()
         nindex = np.arange(df.timestamp.iloc[0], df.timestamp.iloc[-1] + 60000, 60000)
-        return (
-            df[col_names].set_index("timestamp").reindex(nindex).ffill().reset_index()
-        )
+        return df[col_names].set_index("timestamp").reindex(nindex).ffill().reset_index()
 
 
 def count_longest_identical_data(hlc, symbol):
@@ -1216,8 +1241,36 @@ def count_longest_identical_data(hlc, symbol):
     return longest_consecutive
 
 
+def attempt_gap_fix_hlcs(df):
+    interval = 60 * 1000
+    max_gap = interval * 60 * 12  # 12 hours
+    greatest_gap = df.timestamp.diff().max()
+    if greatest_gap == interval:
+        return df
+    if greatest_gap > max_gap:
+        raise Exception(
+            f"ohlcvs gap greater than {max_gap / (1000 * 60 * 60)} hours: {greatest_gap / (1000 * 60 * 60)} hours"
+        )
+    print("gap(s) in ohlcvs... attempting fix")
+    new_timestamps = np.arange(df["timestamp"].iloc[0], df["timestamp"].iloc[-1] + interval, interval)
+    new_df = df.set_index("timestamp").reindex(new_timestamps)
+    new_df.close = new_df.close.ffill()
+    new_df.open = new_df.open.fillna(new_df.close)
+    new_df.high = new_df.high.fillna(new_df.close)
+    new_df.low = new_df.low.fillna(new_df.close)
+    new_df.volume = new_df.volume.fillna(0.0)
+    new_df = new_df.reset_index()
+    return new_df[["timestamp", "open", "high", "low", "close", "volume"]]
+
+
 async def load_hlc_cache(
-    symbol, inverse, start_date, end_date, base_dir="backtests", spot=False, exchange="binance"
+    symbol,
+    inverse,
+    start_date,
+    end_date,
+    base_dir="backtests",
+    spot=False,
+    exchange="binance",
 ):
     cache_fname = (
         f"{ts_to_date_utc(date_to_ts2(start_date))[:10]}_"
@@ -1231,7 +1284,8 @@ async def load_hlc_cache(
         data = np.load(filepath)
     else:
         if exchange == "bybit":
-            df = await download_ohlcvs_bybit(symbol, start_date, end_date, download_only=False)
+            df = await download_ohlcvs_bybit(symbol, start_date, end_date, spot, download_only=False)
+            df = attempt_gap_fix_hlcs(df)
         else:
             df = await download_ohlcvs_binance(symbol, inverse, start_date, end_date, spot)
         df = df[df.timestamp >= date_to_ts2(start_date)]
@@ -1243,6 +1297,49 @@ async def load_hlc_cache(
     except Exception as e:
         print("error checking integrity", e)
     return data
+
+
+async def prepare_multsymbol_data(
+    symbols, start_date, end_date, base_dir, exchange
+) -> (float, np.ndarray):
+    """
+    returns first timestamp and hlc data in the form
+    [
+        [
+            [sym0_high0, sym0_low0, sym0_close0],
+            [sym0_high1, sym0_low1, sym0_close1],
+            ...
+        ],
+        [
+            [sym1_high0, sym1_low0, sym1_close0],
+            [sym1_high1, sym1_low1, sym1_close1],
+            ...
+        ],
+        ...
+    ]
+    """
+    if end_date in ["today", "now", ""]:
+        end_date = ts_to_date_utc(utc_ms())[:10]
+    hlcs = []
+    interval = 60000.0
+    for symbol in symbols:
+        data = await load_hlc_cache(symbol, False, start_date, end_date, base_dir, False, exchange)
+        assert (
+            np.diff(data[:, 0]) == interval
+        ).all(), f"gaps in hlc data {symbol}"  # verify integrous 1m hlcs
+        dft = pd.DataFrame(
+            data, columns=["timestamp"] + [f"{symbol}_{key}" for key in ["high", "low", "close"]]
+        )
+        hlcs.append(dft)
+
+    tss = np.arange(
+        min([x.timestamp.iloc[0] for x in hlcs]),
+        max([x.timestamp.iloc[-1] for x in hlcs]) + interval,
+        interval,
+    )
+    df = pd.concat([x.set_index("timestamp").reindex(tss) for x in hlcs], axis=1, join="outer")
+    df = df.fillna(0.0)
+    return df.index[0], np.array([df.values[:, i : i + 3] for i in range(0, len(symbols) * 3, 3)])
 
 
 async def main():

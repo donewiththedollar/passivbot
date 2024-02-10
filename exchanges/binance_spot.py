@@ -150,7 +150,7 @@ class BinanceBotSpot(Bot):
                         self.price_multiplier_dn = max(
                             float(q["bidMultiplierDown"]), float(q["askMultiplierDown"])
                         )
-                    elif q["filterType"] == "MIN_NOTIONAL":
+                    elif q["filterType"] in ["MIN_NOTIONAL", "NOTIONAL"]:
                         self.min_cost = self.config["min_cost"] = float(q["minNotional"])
                 try:
                     z = self.min_cost
@@ -190,6 +190,7 @@ class BinanceBotSpot(Bot):
                     min_entry_qty = calc_min_entry_qty(
                         order["price"],
                         self.inverse,
+                        self.c_mult,
                         self.qty_step,
                         self.min_qty,
                         self.min_cost,
@@ -223,7 +224,7 @@ class BinanceBotSpot(Bot):
             self.price = np.random.choice(self.ob)
             return True
         except Exception as e:
-            logging.error(f"error updating order book {e}")
+            print(f"error updating order book {e}")
             print_async_exception(ticker)
             return False
 
@@ -299,6 +300,8 @@ class BinanceBotSpot(Bot):
             result = None
             try:
                 result = await creation[1]
+                if "code" in result and result["code"] == -1013:
+                    print("error:", result)
                 results.append(result)
             except Exception as e:
                 print(f"error creating order {creation} {e}")
@@ -341,10 +344,7 @@ class BinanceBotSpot(Bot):
         if params["type"] == "LIMIT":
             params["timeInForce"] = "GTC"
             params["price"] = format_float(order["price"])
-        if "custom_id" in order:
-            params[
-                "newClientOrderId"
-            ] = f"{order['custom_id']}_{str(int(time() * 1000))[8:]}_{int(np.random.random() * 1000)}"
+        params["newClientOrderId"] = order["custom_id"]
         o = await self.private_post(self.endpoints["create_order"], params)
         if "side" in o:
             return {
